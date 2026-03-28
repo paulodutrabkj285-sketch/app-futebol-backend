@@ -1,8 +1,6 @@
 const express = require("express");
 const axios = require("axios");
 const https = require("https");
-const fs = require("fs");
-const path = require("path");
 const cors = require("cors");
 const admin = require("firebase-admin");
 
@@ -10,18 +8,28 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Certificado EFI
-const certificado = fs.readFileSync(
-  path.resolve(__dirname, "certificado.p12")
-);
+// ==========================
+// EFI / CERTIFICADO
+// ==========================
+if (!process.env.CERTIFICADO_BASE64) {
+  throw new Error("CERTIFICADO_BASE64 não configurado no ambiente.");
+}
+
+const certificado = Buffer.from(process.env.CERTIFICADO_BASE64, "base64");
 
 const agent = new https.Agent({
   pfx: certificado,
-  passphrase: "",
+  passphrase: process.env.CERTIFICADO_SENHA || "",
 });
 
-// Firebase Admin
-const serviceAccount = require("./serviceAccountKey.json");
+// ==========================
+// FIREBASE ADMIN
+// ==========================
+if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON não configurado no ambiente.");
+}
+
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -29,6 +37,9 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// ==========================
+// FUNÇÕES AUXILIARES
+// ==========================
 function gerarTxid() {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -39,7 +50,34 @@ function gerarTxid() {
   return txid;
 }
 
-// GERAR PIX E SALVAR NO FIRESTORE
+async function gerarTokenEfi() {
+  const tokenResponse = await axios.post(
+    "https://pix.api.efipay.com.br/oauth/token",
+    {
+      grant_type: "client_credentials",
+    },
+    {
+      httpsAgent: agent,
+      auth: {
+        username: process.env.EFI_CLIENT_ID,
+        password: process.env.EFI_CLIENT_SECRET,
+      },
+    }
+  );
+
+  return tokenResponse.data.access_token;
+}
+
+// ==========================
+// ROTA TESTE
+// ==========================
+app.get("/", (req, res) => {
+  res.send("Backend PIX + Firestore rodando.");
+});
+
+// ==========================
+// CRIAR PIX
+// ==========================
 app.post("/criar-pix", async (req, res) => {
   try {
     const { nome, valor, cpf } = req.body;
@@ -51,21 +89,7 @@ app.post("/criar-pix", async (req, res) => {
       });
     }
 
-    const tokenResponse = await axios.post(
-      "https://pix.api.efipay.com.br/oauth/token",
-      {
-        grant_type: "client_credentials",
-      },
-      {
-        httpsAgent: agent,
-        auth: {
-          username: "SEU_CLIENT_ID",
-          password: "SEU_CLIENT_SECRET",
-        },
-      }
-    );
-
-    const token = tokenResponse.data.access_token;
+    const token = await gerarTokenEfi();
     const txid = gerarTxid();
 
     const cobranca = await axios.put(
@@ -79,7 +103,7 @@ app.post("/criar-pix", async (req, res) => {
         valor: {
           original: Number(valor).toFixed(2),
         },
-        chave: "SUA_CHAVE_PIX",
+        chave: process.env.PIX_KEY,
         solicitacaoPagador: "Mensalidade do time",
       },
       {
@@ -133,7 +157,9 @@ app.post("/criar-pix", async (req, res) => {
   }
 });
 
-// WEBHOOK DA EFI
+// ==========================
+// WEBHOOK PIX
+// ==========================
 app.post("/webhook/efi/pix", async (req, res) => {
   try {
     console.log("Webhook recebido:");
@@ -187,28 +213,17 @@ app.post("/webhook/efi/pix", async (req, res) => {
   }
 });
 
+// ==========================
 // CONFIGURAR WEBHOOK NA EFI
+// ==========================
 app.post("/configurar-webhook", async (req, res) => {
   try {
-    const tokenResponse = await axios.post(
-      "https://pix.api.efipay.com.br/oauth/token",
-      {
-        grant_type: "client_credentials",
-      },
-      {
-        httpsAgent: agent,
-        auth: {
-          username: "Client_Id_aec6183933b5525a3eb935c9652372bb7439f8d6",
-          password: "Client_Secret_bb88b9e3f06b2e96d1ca463c93c2a0a567361703",
-        },
-      }
-    );
-
-    const token = tokenResponse.data.access_token;
-    const chavePix = "juniordutrabkj285@gmail.com";
+    const token = await gerarTokenEfi();
 
     const response = await axios.put(
-      `https://pix.api.efipay.com.br/v2/webhook/${encodeURIComponent(chavePix)}`,
+      `https://pix.api.efipay.com.br/v2/webhook/${encodeURIComponent(
+        process.env.PIX_KEY
+      )}`,
       {
         webhookUrl: "https://app-futebol-backend.onrender.com/webhook/efi/pix",
       },
@@ -237,6 +252,9 @@ app.post("/configurar-webhook", async (req, res) => {
   }
 });
 
+// ==========================
+// INICIAR SERVIDOR
+// ==========================
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
