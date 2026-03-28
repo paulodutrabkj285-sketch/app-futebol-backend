@@ -13,19 +13,23 @@ app.use(cors());
 ========================= */
 let db;
 let firebaseProjectId = null;
+let firebaseClientEmail = null;
 
 try {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+
   if (!raw) {
     throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON não definida");
   }
 
   const serviceAccount = JSON.parse(raw);
-  firebaseProjectId = serviceAccount.project_id;
+  firebaseProjectId = serviceAccount.project_id || null;
+  firebaseClientEmail = serviceAccount.client_email || null;
 
   if (!admin.apps.length) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
+      projectId: serviceAccount.project_id,
     });
   }
 
@@ -33,7 +37,7 @@ try {
 
   console.log("✅ Firebase inicializado");
   console.log("📌 Projeto Firebase:", firebaseProjectId);
-  console.log("📌 Client email:", serviceAccount.client_email);
+  console.log("📌 Client email:", firebaseClientEmail);
 } catch (error) {
   console.error("❌ Erro ao inicializar Firebase:", error.message);
 }
@@ -70,26 +74,24 @@ function gerarTxid() {
 }
 
 /* =========================
-   TESTE FIREBASE
+   ROTAS DE TESTE
 ========================= */
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     mensagem: "Backend online vOK",
     projetoFirebase: firebaseProjectId,
+    clientEmail: firebaseClientEmail,
   });
 });
 
 app.get("/debug/firebase", async (req, res) => {
+  const info = {
+    envProjectId: firebaseProjectId,
+    envClientEmail: firebaseClientEmail,
+  };
+
   try {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-
-    const info = {
-      envProjectId: serviceAccount.project_id || null,
-      envClientEmail: serviceAccount.client_email || null,
-      firebaseProjectId: firebaseProjectId || null,
-    };
-
     if (!db) {
       return res.status(500).json({
         ok: false,
@@ -98,41 +100,58 @@ app.get("/debug/firebase", async (req, res) => {
       });
     }
 
-    await db.collection("debug_backend").doc("teste").set(
-      {
-        status: "ok",
-        atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    // teste 1: tentar ler uma coleção que já existe
+    let cobrancasCount = null;
+    try {
+      const snapshot = await db.collection("cobrancas").limit(1).get();
+      cobrancasCount = snapshot.size;
+    } catch (readError) {
+      return res.status(500).json({
+        ok: false,
+        etapa: "leitura_cobrancas",
+        erro: readError.message,
+        code: readError.code || null,
+        details: readError.details || null,
+        info,
+      });
+    }
+
+    // teste 2: tentar gravar
+    try {
+      await db.collection("debug_backend").doc("teste").set(
+        {
+          status: "ok",
+          atualizadoEm: admin.firestore.FieldValue.serverTimestamp(),
+          origem: "debug/firebase",
+        },
+        { merge: true }
+      );
+    } catch (writeError) {
+      return res.status(500).json({
+        ok: false,
+        etapa: "escrita_debug_backend",
+        erro: writeError.message,
+        code: writeError.code || null,
+        details: writeError.details || null,
+        info,
+        cobrancasCount,
+      });
+    }
 
     return res.json({
       ok: true,
       mensagem: "Firestore OK",
       info,
+      cobrancasCount,
     });
   } catch (error) {
-    let envInfo = null;
-
-    try {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-      envInfo = {
-        envProjectId: serviceAccount.project_id || null,
-        envClientEmail: serviceAccount.client_email || null,
-        firebaseProjectId: firebaseProjectId || null,
-      };
-    } catch (e) {
-      envInfo = {
-        erroAoLerEnv: e.message,
-      };
-    }
-
     return res.status(500).json({
       ok: false,
+      etapa: "erro_geral",
       erro: error.message,
       code: error.code || null,
       details: error.details || null,
-      info: envInfo,
+      info,
     });
   }
 });
