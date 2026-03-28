@@ -1,16 +1,16 @@
-const functions = require("firebase-functions");
-const admin = require("firebase-admin");
-const { getFirestore } = require("firebase-admin/firestore");
-
-const fs = require("fs");
-const path = require("path");
-const https = require("https");
+const express = require("express");
 const axios = require("axios");
-const cors = require("cors")({ origin: true });
+const https = require("https");
+const cors = require("cors");
+const admin = require("firebase-admin");
 
-admin.initializeApp
-  const admin = require("firebase-admin");
+const app = express();
+app.use(express.json());
+app.use(cors());
 
+/* =========================
+   FIREBASE (CORRIGIDO)
+========================= */
 const serviceAccount = JSON.parse(
   process.env.FIREBASE_SERVICE_ACCOUNT_JSON
 );
@@ -20,177 +20,208 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-  
 
-// =========================
-// COLE SUAS CREDENCIAIS AQUI
-// =========================
-const EFI_CLIENT_ID = "Client_Id_aec6183933b5525a3eb935c9652372bb7439f8d6";
-const EFI_CLIENT_SECRET = "Client_Secret_bb88b9e3f06b2e96d1ca463c93c2a0a567361703";
-const EFI_PIX_KEY = "juniordutrabkj285@gmail.com";
+/* =========================
+   CERTIFICADO EFI (BASE64)
+========================= */
+const certificado = Buffer.from(
+  process.env.CERTIFICADO_BASE64,
+  "base64"
+);
 
-// =========================
-// TOKEN EFI
-// =========================
-async function obterTokenEfi() {
-  const certPath = path.join(__dirname, "certificado.p12");
-
-  const certBuffer = fs.readFileSync(certPath);
-
-  const agent = new https.Agent({
-    pfx: certBuffer,
-    passphrase: "",
-  });
-
-  const auth = Buffer.from(
-    `${EFI_CLIENT_ID}:${EFI_CLIENT_SECRET}`
-  ).toString("base64");
-
-  const response = await axios.post(
-    "https://pix.api.efipay.com.br/oauth/token",
-    {
-      grant_type: "client_credentials",
-    },
-    {
-      httpsAgent: agent,
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  return {
-    token: response.data.access_token,
-    agent,
-  };
-}
-
-// =========================
-// CRIAR COBRANÇA PIX
-// =========================
-exports.criarCobrancaPixEfiNovo = functions.https.onRequest((req, res) => {
-  cors(req, res, async () => {
-    try {
-      if (req.method === "OPTIONS") {
-        return res.status(204).send("");
-      }
-
-      if (req.method !== "POST") {
-        return res.status(405).json({
-          sucesso: false,
-          mensagem: "Use método POST",
-        });
-      }
-
-      const body =
-  typeof req.body === "string"
-    ? JSON.parse(req.body)
-    : req.body || {};
-
-const { jogadorId, nome, valor, cpf } = body;
-
-if (!jogadorId || !nome || !valor || !cpf) {
-  return res.status(400).json({
-    sucesso: false,
-    mensagem: "Campos obrigatórios",
-    bodyRecebido: body,
-  });
-}
-
-      const { token, agent } = await obterTokenEfi();
-
-      const cobranca = await axios.post(
-        "https://pix.api.efipay.com.br/v2/cob",
-        {
-          calendario: { expiracao: 3600 },
-          devedor: {
-            nome: nome,
-            cpf: cpf.replace(/\D/g, ""),
-          },
-          valor: {
-            original: Number(valor).toFixed(2),
-          },
-          chave: EFI_PIX_KEY,
-          solicitacaoPagador: `Mensalidade do jogador ${nome}`,
-        },
-        {
-          httpsAgent: agent,
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      const locId = cobranca.data.loc.id;
-
-      const qr = await axios.get(
-        `https://pix.api.efipay.com.br/v2/loc/${locId}/qrcode`,
-        {
-          httpsAgent: agent,
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
-
-      const mensalidade = {
-        jogadorId,
-        nome,
-        valor: Number(valor),
-        cpf: cpf,
-        txid: cobranca.data.txid,
-        copia_e_cola: qr.data.qrcode,
-        imagem: qr.data.imagemQrcode,
-        criadaEm: admin.firestore.FieldValue.serverTimestamp(),
-        paga: false,
-      };
-
-      await db.collection("mensalidades").add(mensalidade);
-
-      return res.status(200).json({
-        sucesso: true,
-        dados: mensalidade,
-      });
-          return res.status(200).json({
-        sucesso: true,
-        dados: mensalidade,
-      });
-    } catch (error) {
-      console.error("ERRO COMPLETO:", error);
-      console.error("ERRO RESPONSE DATA:", error.response?.data);
-      console.error("ERRO MESSAGE:", error.message);
-
-      return res.status(500).json({
-        sucesso: false,
-        erro: error.message,
-        detalhes: error.response?.data || null,
-        stack: error.stack || null,
-      });
-    }
-  });
+const agent = new https.Agent({
+  pfx: certificado,
+  passphrase: "",
 });
 
-// =========================
-// LISTAR
-// =========================
-exports.testeFirestore = functions.https.onRequest(async (req, res) => {
+/* =========================
+   GERAR TXID
+========================= */
+function gerarTxid() {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let txid = "";
+  for (let i = 0; i < 30; i++) {
+    txid += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return txid;
+}
+
+/* =========================
+   CRIAR PIX + SALVAR FIRESTORE
+========================= */
+app.post("/criar-pix", async (req, res) => {
   try {
-    const db = admin.firestore();
+    const { nome, valor, cpf } = req.body;
 
-    const snapshot = await db.collection("mensalidades").get();
+    // TOKEN EFI
+    const tokenResponse = await axios.post(
+      "https://pix.api.efipay.com.br/oauth/token",
+      {
+        grant_type: "client_credentials",
+      },
+      {
+        httpsAgent: agent,
+        auth: {
+          username: process.env.EFI_CLIENT_ID,
+          password: process.env.EFI_CLIENT_SECRET,
+        },
+      }
+    );
 
-    return res.status(200).json({
-      sucesso: true,
-      total: snapshot.size
+    const token = tokenResponse.data.access_token;
+    const txid = gerarTxid();
+
+    // CRIAR COBRANÇA PIX
+    const cobranca = await axios.put(
+      `https://pix.api.efipay.com.br/v2/cob/${txid}`,
+      {
+        calendario: { expiracao: 3600 },
+        devedor: { cpf, nome },
+        valor: {
+          original: Number(valor).toFixed(2),
+        },
+        chave: process.env.PIX_KEY,
+        solicitacaoPagador: "Mensalidade do time",
+      },
+      {
+        httpsAgent: agent,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const locId = cobranca.data.loc.id;
+
+    // GERAR QR CODE
+    const qrCode = await axios.get(
+      `https://pix.api.efipay.com.br/v2/loc/${locId}/qrcode`,
+      {
+        httpsAgent: agent,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    /* =========================
+       SALVAR NO FIRESTORE
+    ========================= */
+    await db.collection("cobrancas").add({
+      nome,
+      cpf,
+      valor,
+      txid,
+      status: "pendente",
+      criadoEm: new Date(),
     });
 
+    res.json({
+      sucesso: true,
+      txid,
+      copiaecola: qrCode.data.qrcode,
+      imagem: qrCode.data.imagemQrcode,
+    });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({
-      sucesso: false,
-      erro: error.message
+    console.log("ERRO PIX:", error.response?.data || error.message);
+
+    res.status(500).json({
+      erro: "Erro ao gerar PIX",
+      detalhe: error.response?.data || error.message,
     });
   }
+});
+
+/* =========================
+   WEBHOOK EFI
+========================= */
+app.post("/webhook/efi/pix", async (req, res) => {
+  try {
+    const pixRecebido = req.body?.pix;
+
+    if (!pixRecebido) return res.sendStatus(200);
+
+    for (const pagamento of pixRecebido) {
+      const txid = pagamento.txid;
+
+      const snapshot = await db
+        .collection("cobrancas")
+        .where("txid", "==", txid)
+        .get();
+
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+
+        await doc.ref.update({
+          status: "pago",
+          pagoEm: new Date(),
+        });
+
+        console.log("Pagamento confirmado:", txid);
+      }
+    }
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.log("Erro webhook:", error.message);
+    res.sendStatus(200);
+  }
+});
+
+/* =========================
+   CONFIGURAR WEBHOOK
+========================= */
+app.post("/configurar-webhook", async (req, res) => {
+  try {
+    const tokenResponse = await axios.post(
+      "https://pix.api.efipay.com.br/oauth/token",
+      {
+        grant_type: "client_credentials",
+      },
+      {
+        httpsAgent: agent,
+        auth: {
+          username: process.env.EFI_CLIENT_ID,
+          password: process.env.EFI_CLIENT_SECRET,
+        },
+      }
+    );
+
+    const token = tokenResponse.data.access_token;
+
+    const webhookUrl =
+      "https://app-futebol-backend.onrender.com/webhook/efi/pix";
+
+    await axios.put(
+      `https://pix.api.efipay.com.br/v2/webhook/${process.env.PIX_KEY}`,
+      {
+        webhookUrl,
+      },
+      {
+        httpsAgent: agent,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    res.json({ sucesso: true, webhookUrl });
+  } catch (error) {
+    console.log("Erro webhook:", error.response?.data || error.message);
+
+    res.status(500).json({
+      erro: "Erro ao configurar webhook",
+    });
+  }
+});
+
+/* =========================
+   SERVER
+========================= */
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("Servidor rodando na porta " + PORT);
 });
