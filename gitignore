@@ -1,2 +1,4 @@
 node_modules
 certificado.p12
+serviceAccountKey.json
+.env
