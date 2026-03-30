@@ -35,6 +35,14 @@ try {
 
   db = admin.firestore();
 
+  // tenta garantir uso do banco default
+  if (db && db._settings) {
+    db._settings = {
+      ...db._settings,
+      databaseId: "(default)",
+    };
+  }
+
   console.log("✅ Firebase inicializado");
   console.log("📌 Projeto Firebase:", firebaseProjectId);
   console.log("📌 Client email:", firebaseClientEmail);
@@ -89,6 +97,7 @@ app.get("/debug/firebase", async (req, res) => {
   const info = {
     envProjectId: firebaseProjectId,
     envClientEmail: firebaseClientEmail,
+    databaseId: db?._settings?.databaseId || null,
   };
 
   try {
@@ -100,7 +109,7 @@ app.get("/debug/firebase", async (req, res) => {
       });
     }
 
-    // teste 1: tentar ler uma coleção que já existe
+    // teste 1: leitura
     let cobrancasCount = null;
     try {
       const snapshot = await db.collection("cobrancas").limit(1).get();
@@ -116,7 +125,7 @@ app.get("/debug/firebase", async (req, res) => {
       });
     }
 
-    // teste 2: tentar gravar
+    // teste 2: escrita
     try {
       await db.collection("debug_backend").doc("teste").set(
         {
