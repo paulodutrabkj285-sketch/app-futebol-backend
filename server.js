@@ -169,7 +169,7 @@ app.get("/debug/firebase", async (req, res) => {
 ========================= */
 app.post("/criar-pix", async (req, res) => {
   try {
-    const { nome, valor, cpf, jogadorId, mesReferencia } = req.body;
+    const { nome, valor, cpf, jogadorId, mes } = req.body;
 
     console.log("➡️ /criar-pix body:", req.body);
 
@@ -184,6 +184,13 @@ app.post("/criar-pix", async (req, res) => {
       return res.status(500).json({
         ok: false,
         erro: "Firestore não inicializado",
+      });
+    }
+
+    if (!agent) {
+      return res.status(500).json({
+        ok: false,
+        erro: "Certificado EFI não carregado",
       });
     }
 
@@ -209,12 +216,17 @@ app.post("/criar-pix", async (req, res) => {
       `https://pix.api.efipay.com.br/v2/cob/${txid}`,
       {
         calendario: { expiracao: 3600 },
-        devedor: { cpf, nome },
+        devedor: {
+          cpf: String(cpf).replace(/\D/g, ""),
+          nome,
+        },
         valor: {
           original: Number(valor).toFixed(2),
         },
         chave: process.env.PIX_KEY,
-        solicitacaoPagador: "Mensalidade do time",
+        solicitacaoPagador: mes
+          ? `Mensalidade do time - ${mes}`
+          : "Mensalidade do time",
       },
       {
         httpsAgent: agent,
@@ -246,11 +258,11 @@ app.post("/criar-pix", async (req, res) => {
 
     const payload = {
       nome,
-      cpf,
+      cpf: String(cpf).replace(/\D/g, ""),
       valor: Number(valor),
       txid,
       jogadorId: jogadorId || null,
-      mesReferencia: mesReferencia || null,
+      mes: mes || null,
       status: "pendente",
       criadoEm: FieldValue.serverTimestamp(),
       atualizadoEm: FieldValue.serverTimestamp(),
@@ -270,8 +282,8 @@ app.post("/criar-pix", async (req, res) => {
     return res.json({
       sucesso: true,
       txid,
-      copiaecola: qrCode.data.qrcode,
-      imagem: qrCode.data.imagemQrcode,
+      copiaecola: qrCode.data?.qrcode || null,
+      imagem: qrCode.data?.imagemQrcode || null,
     });
   } catch (error) {
     console.log("❌ ERRO PIX:", error.message);
@@ -313,6 +325,13 @@ app.get("/verificar-pagamento/:txid", async (req, res) => {
       });
     }
 
+    if (!agent) {
+      return res.status(500).json({
+        ok: false,
+        erro: "Certificado EFI não carregado",
+      });
+    }
+
     const tokenResponse = await axios.post(
       "https://pix.api.efipay.com.br/oauth/token",
       { grant_type: "client_credentials" },
@@ -337,27 +356,48 @@ app.get("/verificar-pagamento/:txid", async (req, res) => {
       }
     );
 
-    const cobranca = response.data;
-    const statusEfi = cobranca?.status || null;
+    const cobrancaEfi = response.data;
+    const statusEfi = cobrancaEfi?.status || null;
     const foiPago = statusEfi === "CONCLUIDA";
 
+    const cobrancaRef = db.collection("cobrancas").doc(txid);
+    const cobrancaSnap = await cobrancaRef.get();
+    const cobrancaSalva = cobrancaSnap.exists ? cobrancaSnap.data() : null;
+
     if (foiPago) {
-      await db.collection("cobrancas").doc(txid).set(
+      await cobrancaRef.set(
         {
           status: "pago",
           efiStatus: statusEfi,
           pagoEm: FieldValue.serverTimestamp(),
           atualizadoEm: FieldValue.serverTimestamp(),
-          retornoConsulta: cobranca,
+          retornoConsulta: cobrancaEfi,
         },
         { merge: true }
       );
+
+      if (cobrancaSalva?.jogadorId && cobrancaSalva?.mes) {
+        await db
+          .collection("jogadores")
+          .doc(cobrancaSalva.jogadorId)
+          .set(
+            {
+              [`pagamentos.${cobrancaSalva.mes}`]: true,
+              atualizadoEm: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+
+        console.log(
+          `✅ Jogador ${cobrancaSalva.jogadorId} marcado como pago em ${cobrancaSalva.mes}`
+        );
+      }
     } else {
-      await db.collection("cobrancas").doc(txid).set(
+      await cobrancaRef.set(
         {
           efiStatus: statusEfi,
           atualizadoEm: FieldValue.serverTimestamp(),
-          retornoConsulta: cobranca,
+          retornoConsulta: cobrancaEfi,
         },
         { merge: true }
       );
@@ -368,7 +408,7 @@ app.get("/verificar-pagamento/:txid", async (req, res) => {
       txid,
       statusEfi,
       pago: foiPago,
-      cobranca,
+      cobranca: cobrancaEfi,
     });
   } catch (error) {
     console.log("❌ Erro ao verificar pagamento:", error.message);
@@ -407,7 +447,11 @@ app.post("/webhook/efi/pix", async (req, res) => {
       const txid = pagamento.txid;
       if (!txid) continue;
 
-      await db.collection("cobrancas").doc(txid).set(
+      const cobrancaRef = db.collection("cobrancas").doc(txid);
+      const cobrancaSnap = await cobrancaRef.get();
+      const cobrancaSalva = cobrancaSnap.exists ? cobrancaSnap.data() : null;
+
+      await cobrancaRef.set(
         {
           status: "pago",
           pagoEm: FieldValue.serverTimestamp(),
@@ -416,6 +460,19 @@ app.post("/webhook/efi/pix", async (req, res) => {
         },
         { merge: true }
       );
+
+      if (cobrancaSalva?.jogadorId && cobrancaSalva?.mes) {
+        await db
+          .collection("jogadores")
+          .doc(cobrancaSalva.jogadorId)
+          .set(
+            {
+              [`pagamentos.${cobrancaSalva.mes}`]: true,
+              atualizadoEm: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+      }
 
       console.log("✅ Pagamento confirmado:", txid);
     }
