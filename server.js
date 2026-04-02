@@ -81,6 +81,73 @@ function gerarTxid() {
 }
 
 /* =========================
+   SALVAR HISTÓRICO DE PAGAMENTO
+========================= */
+async function salvarHistoricoPagamento({
+  txid,
+  cobrancaSalva,
+  statusEfi,
+  cobrancaEfi,
+}) {
+  if (!db || !txid || !cobrancaSalva) return;
+
+  const historicoRef = db.collection("historico_pagamentos").doc(txid);
+  const historicoSnap = await historicoRef.get();
+
+  if (historicoSnap.exists) {
+    console.log(`ℹ️ Histórico do txid ${txid} já existe`);
+    return;
+  }
+
+  const payloadHistorico = {
+    txid,
+    jogadorId: cobrancaSalva.jogadorId || null,
+    nome: cobrancaSalva.nome || null,
+    cpf: cobrancaSalva.cpf || null,
+    mes: cobrancaSalva.mes || null,
+    valor: cobrancaSalva.valor || null,
+    status: "pago",
+    statusEfi: statusEfi || "CONCLUIDA",
+    formaPagamento: "pix",
+    tipo: "pix",
+    pagoEm: FieldValue.serverTimestamp(),
+    criadoEm: FieldValue.serverTimestamp(),
+    cobrancaId: txid,
+    loc: cobrancaSalva.loc || null,
+    pixCopiaECola: cobrancaSalva.pixCopiaECola || null,
+    origem: "verificacao_backend",
+    retornoConsulta: cobrancaEfi || null,
+  };
+
+  await historicoRef.set(payloadHistorico, { merge: true });
+  console.log(`✅ Histórico salvo em historico_pagamentos/${txid}`);
+}
+
+/* =========================
+   ATUALIZAR JOGADOR COMO PAGO
+========================= */
+async function atualizarJogadorComoPago(cobrancaSalva) {
+  if (!db || !cobrancaSalva?.jogadorId || !cobrancaSalva?.mes) {
+    return;
+  }
+
+  await db
+    .collection("jogadores")
+    .doc(cobrancaSalva.jogadorId)
+    .set(
+      {
+        [`pagamentos.${cobrancaSalva.mes}`]: true,
+        atualizadoEm: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+  console.log(
+    `✅ Jogador ${cobrancaSalva.jogadorId} marcado como pago em ${cobrancaSalva.mes}`
+  );
+}
+
+/* =========================
    ROTAS DE TESTE
 ========================= */
 app.get("/", (req, res) => {
@@ -376,21 +443,14 @@ app.get("/verificar-pagamento/:txid", async (req, res) => {
         { merge: true }
       );
 
-      if (cobrancaSalva?.jogadorId && cobrancaSalva?.mes) {
-        await db
-          .collection("jogadores")
-          .doc(cobrancaSalva.jogadorId)
-          .set(
-            {
-              [`pagamentos.${cobrancaSalva.mes}`]: true,
-              atualizadoEm: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-          );
-
-        console.log(
-          `✅ Jogador ${cobrancaSalva.jogadorId} marcado como pago em ${cobrancaSalva.mes}`
-        );
+      if (cobrancaSalva) {
+        await atualizarJogadorComoPago(cobrancaSalva);
+        await salvarHistoricoPagamento({
+          txid,
+          cobrancaSalva,
+          statusEfi,
+          cobrancaEfi,
+        });
       }
     } else {
       await cobrancaRef.set(
@@ -461,17 +521,14 @@ app.post("/webhook/efi/pix", async (req, res) => {
         { merge: true }
       );
 
-      if (cobrancaSalva?.jogadorId && cobrancaSalva?.mes) {
-        await db
-          .collection("jogadores")
-          .doc(cobrancaSalva.jogadorId)
-          .set(
-            {
-              [`pagamentos.${cobrancaSalva.mes}`]: true,
-              atualizadoEm: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-          );
+      if (cobrancaSalva) {
+        await atualizarJogadorComoPago(cobrancaSalva);
+        await salvarHistoricoPagamento({
+          txid,
+          cobrancaSalva,
+          statusEfi: "CONCLUIDA",
+          cobrancaEfi: pagamento,
+        });
       }
 
       console.log("✅ Pagamento confirmado:", txid);
@@ -485,51 +542,94 @@ app.post("/webhook/efi/pix", async (req, res) => {
 });
 
 /* =========================
-   CONFIGURAR WEBHOOK
+   LISTAR HISTÓRICO POR JOGADOR
 ========================= */
-app.post("/configurar-webhook", async (req, res) => {
+app.get("/historico-pagamentos/:jogadorId", async (req, res) => {
   try {
-    const tokenResponse = await axios.post(
-      "https://pix.api.efipay.com.br/oauth/token",
-      { grant_type: "client_credentials" },
-      {
-        httpsAgent: agent,
-        auth: {
-          username: process.env.EFI_CLIENT_ID,
-          password: process.env.EFI_CLIENT_SECRET,
-        },
-      }
-    );
+    const { jogadorId } = req.params;
 
-    const token = tokenResponse.data.access_token;
+    if (!jogadorId) {
+      return res.status(400).json({
+        ok: false,
+        erro: "jogadorId não informado",
+      });
+    }
 
-    const webhookUrl =
-      "https://app-futebol-backend.onrender.com/webhook/efi/pix?ignorar=";
+    if (!db) {
+      return res.status(500).json({
+        ok: false,
+        erro: "Firestore não inicializado",
+      });
+    }
 
-    const response = await axios.put(
-      `https://pix.api.efipay.com.br/v2/webhook/${process.env.PIX_KEY}`,
-      { webhookUrl },
-      {
-        httpsAgent: agent,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          "x-skip-mtls-checking": "true",
-        },
-      }
-    );
+    const snapshot = await db
+      .collection("historico_pagamentos")
+      .where("jogadorId", "==", jogadorId)
+      .orderBy("criadoEm", "desc")
+      .get();
+
+    const itens = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
 
     return res.json({
-      sucesso: true,
-      webhookUrl,
-      retorno: response.data,
+      ok: true,
+      total: itens.length,
+      historico: itens,
     });
   } catch (error) {
-    console.log("Erro webhook:", error.response?.data || error.message);
-
+    console.log("❌ Erro ao listar histórico:", error.message);
     return res.status(500).json({
-      erro: "Erro ao configurar webhook",
-      detalhe: error.response?.data || error.message,
+      ok: false,
+      erro: "Erro ao listar histórico",
+      detalhe: error.message,
+    });
+  }
+});
+
+/* =========================
+   LISTAR PENDENTES DE UM MÊS
+========================= */
+app.get("/pendentes/:mes", async (req, res) => {
+  try {
+    const { mes } = req.params;
+
+    if (!mes) {
+      return res.status(400).json({
+        ok: false,
+        erro: "Mês não informado",
+      });
+    }
+
+    if (!db) {
+      return res.status(500).json({
+        ok: false,
+        erro: "Firestore não inicializado",
+      });
+    }
+
+    const snapshot = await db.collection("jogadores").get();
+
+    const pendentes = snapshot.docs
+      .map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }))
+      .filter((jogador) => jogador?.pagamentos?.[mes] !== true);
+
+    return res.json({
+      ok: true,
+      mes,
+      total: pendentes.length,
+      pendentes,
+    });
+  } catch (error) {
+    console.log("❌ Erro ao listar pendentes:", error.message);
+    return res.status(500).json({
+      ok: false,
+      erro: "Erro ao listar pendentes",
+      detalhe: error.message,
     });
   }
 });
