@@ -564,7 +564,7 @@ app.get("/historico-pagamentos/:jogadorId", async (req, res) => {
 
     const snapshot = await db
       .collection("historico_pagamentos")
-      .where("jogadorId", "==", jogadorId)
+      .where("jogadorid", "==", jogadorId)
       .orderBy("criadoEm", "desc")
       .get();
 
