@@ -101,7 +101,7 @@ async function salvarHistoricoPagamento({
 
   const payloadHistorico = {
     txid,
-    jogadorId: cobrancaSalva.jogadorId || null,
+    jogadorid: cobrancaSalva.jogadorId || null,
     nome: cobrancaSalva.nome || null,
     cpf: cobrancaSalva.cpf || null,
     mes: cobrancaSalva.mes || null,
