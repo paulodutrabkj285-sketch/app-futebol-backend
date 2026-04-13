@@ -49,8 +49,8 @@ try {
 
   console.log("✅ Firebase inicializado");
   console.log("📌 Projeto Firebase:", firebaseProjectId);
-  console.log("📌 Client email:", firebaseClientEmail);
-  console.log("📌 Database ID: (default)");
+  console.log("📌 E-mail do cliente:", firebaseClientEmail);
+  console.log("📌 ID do banco de dados: (padrão)");
 } catch (error) {
   console.error("❌ Erro ao inicializar Firebase:", error.message);
 }
@@ -178,7 +178,7 @@ async function salvarHistoricoPagamento({
 }) {
   if (!db || !txid || !cobrancaSalva) return;
 
-  const historicoRef = db.collection("historico_pagamentos").doc(txid);
+  const historicoRef = db.collection("historico_pagamentos").doc(String(txid));
   const historicoSnap = await historicoRef.get();
 
   if (historicoSnap.exists) {
@@ -187,7 +187,7 @@ async function salvarHistoricoPagamento({
   }
 
   const payloadHistorico = {
-    txid,
+    txid: String(txid),
     jogadorid: cobrancaSalva.jogadorId || null,
     nome: cobrancaSalva.nome || null,
     cpf: cobrancaSalva.cpf || null,
@@ -261,53 +261,26 @@ app.get("/debug/firebase", async (req, res) => {
       });
     }
 
-    let cobrancasCount = null;
+    const snapshot = await db.collection("cobrancas").limit(1).get();
 
-    try {
-      const snapshot = await db.collection("cobrancas").limit(1).get();
-      cobrancasCount = snapshot.size;
-    } catch (readError) {
-      return res.status(500).json({
-        ok: false,
-        etapa: "leitura_cobrancas",
-        erro: readError.message,
-        code: readError.code || null,
-        details: readError.details || null,
-        info,
-      });
-    }
-
-    try {
-      await db.collection("debug_backend").doc("teste").set(
-        {
-          status: "ok",
-          atualizadoEm: FieldValue.serverTimestamp(),
-          origem: "debug/firebase",
-        },
-        { merge: true }
-      );
-    } catch (writeError) {
-      return res.status(500).json({
-        ok: false,
-        etapa: "escrita_debug_backend",
-        erro: writeError.message,
-        code: writeError.code || null,
-        details: writeError.details || null,
-        info,
-        cobrancasCount,
-      });
-    }
+    await db.collection("debug_backend").doc("teste").set(
+      {
+        status: "ok",
+        atualizadoEm: FieldValue.serverTimestamp(),
+        origem: "debug/firebase",
+      },
+      { merge: true }
+    );
 
     return res.json({
       ok: true,
       mensagem: "Firestore OK",
       info,
-      cobrancasCount,
+      cobrancasCount: snapshot.size,
     });
   } catch (error) {
     return res.status(500).json({
       ok: false,
-      etapa: "erro_geral",
       erro: error.message,
       code: error.code || null,
       details: error.details || null,
@@ -608,16 +581,6 @@ app.post("/criar-link-cartao", async (req, res) => {
           amount: 1,
         },
       ],
-      payment: {
-        credit_card: {
-          customer: {
-            name: nome,
-            cpf: somenteNumeros(cpf),
-            email: email || "cliente@gentefera.com",
-            phone_number: somenteNumeros(telefone || "48999999999"),
-          },
-        },
-      },
       metadata: {
         notification_url: EFI_NOTIFICATION_URL,
         custom_id: JSON.stringify({
@@ -625,6 +588,15 @@ app.post("/criar-link-cartao", async (req, res) => {
           mes: mes || nomeMesAtual(),
           nome,
         }),
+      },
+      customer: {
+        name: nome,
+        email: email || "cliente@gentefera.com",
+        cpf: somenteNumeros(cpf),
+        phone_number: somenteNumeros(telefone || "48999999999"),
+      },
+      settings: {
+        payment_method: "credit_card",
       },
     };
 
@@ -663,6 +635,8 @@ app.post("/criar-link-cartao", async (req, res) => {
         tipo: "cartao",
         chargeId,
         paymentUrl,
+        email: email || "cliente@gentefera.com",
+        telefone: telefone || null,
         criadoEm: FieldValue.serverTimestamp(),
         atualizadoEm: FieldValue.serverTimestamp(),
       },
@@ -695,7 +669,10 @@ app.post("/criar-link-cartao", async (req, res) => {
 ========================= */
 app.post("/notificacao-efi", async (req, res) => {
   try {
-    console.log("📥 Notificação EFI recebida:", JSON.stringify(req.body, null, 2));
+    console.log(
+      "📥 Notificação EFI recebida:",
+      JSON.stringify(req.body, null, 2)
+    );
 
     const tokenNotificacao =
       req.body?.notification ||
