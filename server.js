@@ -553,7 +553,7 @@ app.post("/webhook/efi/pix", async (req, res) => {
 ========================= */
 app.post("/criar-link-cartao", async (req, res) => {
   try {
-    const { nome, valor, cpf, jogadorId, mes, email, telefone } = req.body;
+    const { nome, valor, cpf, jogadorId, mes, email } = req.body;
 
     console.log("➡️ /criar-link-cartao body:", req.body);
 
@@ -582,18 +582,16 @@ app.post("/criar-link-cartao", async (req, res) => {
         },
       ],
       metadata: {
-        notification_url: EFI_NOTIFICATION_URL,
         custom_id: JSON.stringify({
           jogadorId: jogadorId || null,
           mes: mes || nomeMesAtual(),
           nome,
+          cpf: somenteNumeros(cpf),
         }),
+        notification_url: EFI_NOTIFICATION_URL,
       },
       customer: {
-        name: nome,
         email: email || "cliente@gentefera.com",
-        cpf: somenteNumeros(cpf),
-        phone_number: somenteNumeros(telefone || "48999999999"),
       },
       settings: {
         payment_method: "credit_card",
@@ -636,7 +634,6 @@ app.post("/criar-link-cartao", async (req, res) => {
         chargeId,
         paymentUrl,
         email: email || "cliente@gentefera.com",
-        telefone: telefone || null,
         criadoEm: FieldValue.serverTimestamp(),
         atualizadoEm: FieldValue.serverTimestamp(),
       },
@@ -663,6 +660,7 @@ app.post("/criar-link-cartao", async (req, res) => {
     });
   }
 });
+   
 
 /* =========================
    NOTIFICAÇÃO EFI CARTÃO
