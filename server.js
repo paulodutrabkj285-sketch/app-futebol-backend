@@ -593,9 +593,6 @@ app.post("/criar-link-cartao", async (req, res) => {
       customer: {
         email: email || "cliente@gentefera.com",
       },
-      settings: {
-        payment_method: "credit_card",
-      },
     };
 
     const response = await axios.post(
