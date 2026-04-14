@@ -616,7 +616,7 @@ app.post("/criar-link-cartao", async (req, res) => {
 
     // PASSO 2: gera o link para cartão
     const payloadLink = {
-      payment_method: "credit_card",
+      payment_method: "all",
     };
 
     const responseLink = await axios.post(
