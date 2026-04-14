@@ -573,7 +573,8 @@ app.post("/criar-link-cartao", async (req, res) => {
 
     const token = await obterTokenCobrancas();
 
-    const payload = {
+    // PASSO 1: cria a transação
+    const payloadCharge = {
       items: [
         {
           name: `Mensalidade ${mes || nomeMesAtual()} - ${nome}`,
@@ -587,20 +588,15 @@ app.post("/criar-link-cartao", async (req, res) => {
           mes: mes || nomeMesAtual(),
           nome,
           cpf: somenteNumeros(cpf),
+          email: email || "cliente@gentefera.com",
         }),
         notification_url: EFI_NOTIFICATION_URL,
       },
-      customer: {
-        email: email || "cliente@gentefera.com",
-      },
-      settings: {
-        payment_method: "credit_card",
-      },
     };
 
-    const response = await axios.post(
-      "https://cobrancas.api.efipay.com.br/v1/charge/one-step/link",
-      payload,
+    const responseCharge = await axios.post(
+      "https://cobrancas.api.efipay.com.br/v1/charge",
+      payloadCharge,
       {
         httpsAgent: agent,
         headers: {
@@ -610,15 +606,40 @@ app.post("/criar-link-cartao", async (req, res) => {
       }
     );
 
-    const data = response.data?.data || response.data || {};
-    const chargeId = data.charge_id || data.chargeId || data.id || null;
-    const paymentUrl = data.payment_url || data.paymentUrl || null;
+    const chargeData = responseCharge.data?.data || responseCharge.data || {};
+    const chargeId =
+      chargeData.charge_id || chargeData.chargeId || chargeData.id || null;
+
+    if (!chargeId) {
+      throw new Error("A Efí não retornou charge_id");
+    }
+
+    // PASSO 2: gera o link para cartão
+    const payloadLink = {
+      payment_method: "credit_card",
+    };
+
+    const responseLink = await axios.post(
+      `https://cobrancas.api.efipay.com.br/v1/charge/${chargeId}/link`,
+      payloadLink,
+      {
+        httpsAgent: agent,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const linkData = responseLink.data?.data || responseLink.data || {};
+    const paymentUrl =
+      linkData.payment_url || linkData.paymentUrl || null;
 
     if (!paymentUrl) {
       throw new Error("A Efí não retornou payment_url");
     }
 
-    const docId = chargeId ? String(chargeId) : gerarTxid();
+    const docId = String(chargeId);
 
     await db.collection("cobrancas").doc(docId).set(
       {
@@ -660,7 +681,6 @@ app.post("/criar-link-cartao", async (req, res) => {
     });
   }
 });
-   
 
 /* =========================
    NOTIFICAÇÃO EFI CARTÃO
