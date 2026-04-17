@@ -1,7 +1,7 @@
 {
   "name": "app-futebol-backend",
   "version": "1.0.0",
-  "description": "Backend do Gente Fera FC com PIX, cartão e Firestore",
+  "description": "Backend do Gente Fera FC",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -13,7 +13,7 @@
     "axios": "^1.13.6",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "firebase-admin": "^12.0.0"
+    "firebase-admin": "^12.0.0",
     "sdk-node-apis-efi": "^1.3.1"
   }
 }
