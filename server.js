@@ -2,6 +2,8 @@ const express = require("express");
 const axios = require("axios");
 const https = require("https");
 const cors = require("cors");
+const path = require("path");
+const EfiPay = require("sdk-node-apis-efi");
 
 const { initializeApp, cert, getApps } = require("firebase-admin/app");
 const {
@@ -10,14 +12,8 @@ const {
 } = require("firebase-admin/firestore");
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json());
 app.use(cors());
-
-/* =========================
-   CONFIG EFI
-========================= */
-const EFI_NOTIFICATION_URL =
-  "https://app-futebol-backend.onrender.com/notificacao-efi";
 
 /* =========================
    FIREBASE
@@ -49,8 +45,8 @@ try {
 
   console.log("✅ Firebase inicializado");
   console.log("📌 Projeto Firebase:", firebaseProjectId);
-  console.log("📌 E-mail do cliente:", firebaseClientEmail);
-  console.log("📌 ID do banco de dados: (padrão)");
+  console.log("📌 Client email:", firebaseClientEmail);
+  console.log("📌 Database ID: (default)");
 } catch (error) {
   console.error("❌ Erro ao inicializar Firebase:", error.message);
 }
@@ -74,12 +70,20 @@ try {
 }
 
 /* =========================
+   SDK EFI
+========================= */
+const efiOptions = {
+  sandbox: false,
+  client_id: process.env.EFI_CLIENT_ID,
+  client_secret: process.env.EFI_CLIENT_SECRET,
+  certificate: path.resolve(__dirname, "certificado.p12"),
+};
+
+const efipay = new EfiPay(efiOptions);
+
+/* =========================
    AUXILIARES
 ========================= */
-function somenteNumeros(valor = "") {
-  return String(valor).replace(/\D/g, "");
-}
-
 function gerarTxid() {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -90,85 +94,12 @@ function gerarTxid() {
   return txid;
 }
 
-function nomeMesAtual() {
-  const meses = [
-    "Janeiro",
-    "Fevereiro",
-    "Março",
-    "Abril",
-    "Maio",
-    "Junho",
-    "Julho",
-    "Agosto",
-    "Setembro",
-    "Outubro",
-    "Novembro",
-    "Dezembro",
-  ];
-  return meses[new Date().getMonth()];
-}
-
-function statusInternoPorStatusEfi(status) {
-  const s = String(status || "").toLowerCase();
-
-  if (s === "paid") return "Pago";
-  if (s === "approved") return "Aprovado";
-  if (s === "unpaid") return "Não pago";
-  if (s === "canceled") return "Cancelado";
-  if (s === "refunded") return "Estornado";
-  if (s === "new" || s === "waiting" || s === "link") return "Pendente";
-
-  return "Pendente";
+function somenteNumeros(valor = "") {
+  return String(valor).replace(/\D/g, "");
 }
 
 /* =========================
-   TOKENS EFI
-========================= */
-async function obterTokenPix() {
-  if (!agent) {
-    throw new Error("Certificado EFI não carregado");
-  }
-
-  const tokenResponse = await axios.post(
-    "https://pix.api.efipay.com.br/oauth/token",
-    { grant_type: "client_credentials" },
-    {
-      httpsAgent: agent,
-      auth: {
-        username: process.env.EFI_CLIENT_ID,
-        password: process.env.EFI_CLIENT_SECRET,
-      },
-    }
-  );
-
-  return tokenResponse.data.access_token;
-}
-
-async function obterTokenCobrancas() {
-  if (!agent) {
-    throw new Error("Certificado EFI não carregado");
-  }
-
-  const response = await axios.post(
-    "https://cobrancas.api.efipay.com.br/v1/authorize",
-    {},
-    {
-      httpsAgent: agent,
-      auth: {
-        username: process.env.EFI_CLIENT_ID,
-        password: process.env.EFI_CLIENT_SECRET,
-      },
-      headers: {
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  return response.data.access_token;
-}
-
-/* =========================
-   HISTÓRICO / JOGADOR
+   SALVAR HISTÓRICO DE PAGAMENTO
 ========================= */
 async function salvarHistoricoPagamento({
   txid,
@@ -196,7 +127,7 @@ async function salvarHistoricoPagamento({
     status: "pago",
     statusEfi: statusEfi || "CONCLUIDA",
     formaPagamento: cobrancaSalva.formaPagamento || "pix",
-    tipo: cobrancaSalva.tipo || cobrancaSalva.formaPagamento || "pix",
+    tipo: cobrancaSalva.tipo || "pix",
     pagoEm: FieldValue.serverTimestamp(),
     criadoEm: FieldValue.serverTimestamp(),
     cobrancaId: cobrancaSalva.chargeId || txid,
@@ -211,6 +142,9 @@ async function salvarHistoricoPagamento({
   console.log(`✅ Histórico salvo em historico_pagamentos/${txid}`);
 }
 
+/* =========================
+   ATUALIZAR JOGADOR COMO PAGO
+========================= */
 async function atualizarJogadorComoPago(cobrancaSalva) {
   if (!db || !cobrancaSalva?.jogadorId || !cobrancaSalva?.mes) {
     return;
@@ -233,7 +167,7 @@ async function atualizarJogadorComoPago(cobrancaSalva) {
 }
 
 /* =========================
-   TESTES
+   ROTAS DE TESTE
 ========================= */
 app.get("/", (req, res) => {
   res.json({
@@ -261,26 +195,53 @@ app.get("/debug/firebase", async (req, res) => {
       });
     }
 
-    const snapshot = await db.collection("cobrancas").limit(1).get();
+    let cobrancasCount = null;
 
-    await db.collection("debug_backend").doc("teste").set(
-      {
-        status: "ok",
-        atualizadoEm: FieldValue.serverTimestamp(),
-        origem: "debug/firebase",
-      },
-      { merge: true }
-    );
+    try {
+      const snapshot = await db.collection("cobrancas").limit(1).get();
+      cobrancasCount = snapshot.size;
+    } catch (readError) {
+      return res.status(500).json({
+        ok: false,
+        etapa: "leitura_cobrancas",
+        erro: readError.message,
+        code: readError.code || null,
+        details: readError.details || null,
+        info,
+      });
+    }
+
+    try {
+      await db.collection("debug_backend").doc("teste").set(
+        {
+          status: "ok",
+          atualizadoEm: FieldValue.serverTimestamp(),
+          origem: "debug/firebase",
+        },
+        { merge: true }
+      );
+    } catch (writeError) {
+      return res.status(500).json({
+        ok: false,
+        etapa: "escrita_debug_backend",
+        erro: writeError.message,
+        code: writeError.code || null,
+        details: writeError.details || null,
+        info,
+        cobrancasCount,
+      });
+    }
 
     return res.json({
       ok: true,
       mensagem: "Firestore OK",
       info,
-      cobrancasCount: snapshot.size,
+      cobrancasCount,
     });
   } catch (error) {
     return res.status(500).json({
       ok: false,
+      etapa: "erro_geral",
       erro: error.message,
       code: error.code || null,
       details: error.details || null,
@@ -290,7 +251,7 @@ app.get("/debug/firebase", async (req, res) => {
 });
 
 /* =========================
-   CRIAR PIX
+   CRIAR PIX + SALVAR FIRESTORE
 ========================= */
 app.post("/criar-pix", async (req, res) => {
   try {
@@ -312,8 +273,30 @@ app.post("/criar-pix", async (req, res) => {
       });
     }
 
-    const token = await obterTokenPix();
+    if (!agent) {
+      return res.status(500).json({
+        ok: false,
+        erro: "Certificado EFI não carregado",
+      });
+    }
+
+    const tokenResponse = await axios.post(
+      "https://pix.api.efipay.com.br/oauth/token",
+      { grant_type: "client_credentials" },
+      {
+        httpsAgent: agent,
+        auth: {
+          username: process.env.EFI_CLIENT_ID,
+          password: process.env.EFI_CLIENT_SECRET,
+        },
+      }
+    );
+
+    const token = tokenResponse.data.access_token;
     const txid = gerarTxid();
+
+    console.log("✅ Token EFI obtido");
+    console.log("📌 TXID:", txid);
 
     const cobranca = await axios.put(
       `https://pix.api.efipay.com.br/v2/cob/${txid}`,
@@ -340,6 +323,8 @@ app.post("/criar-pix", async (req, res) => {
       }
     );
 
+    console.log("✅ Cobrança criada na EFI");
+
     const locId = cobranca.data?.loc?.id;
     if (!locId) {
       throw new Error("loc.id não retornado pela EFI");
@@ -354,6 +339,8 @@ app.post("/criar-pix", async (req, res) => {
         },
       }
     );
+
+    console.log("✅ QR Code gerado");
 
     const payload = {
       nome,
@@ -392,14 +379,12 @@ app.post("/criar-pix", async (req, res) => {
     return res.status(500).json({
       erro: "Erro ao gerar PIX",
       detalhe: error.response?.data || error.message,
-      code: error.code || null,
-      details: error.details || null,
     });
   }
 });
 
 /* =========================
-   VERIFICAR PAGAMENTO PIX
+   VERIFICAR PAGAMENTO POR TXID
 ========================= */
 app.get("/verificar-pagamento/:txid", async (req, res) => {
   try {
@@ -419,7 +404,26 @@ app.get("/verificar-pagamento/:txid", async (req, res) => {
       });
     }
 
-    const token = await obterTokenPix();
+    if (!agent) {
+      return res.status(500).json({
+        ok: false,
+        erro: "Certificado EFI não carregado",
+      });
+    }
+
+    const tokenResponse = await axios.post(
+      "https://pix.api.efipay.com.br/oauth/token",
+      { grant_type: "client_credentials" },
+      {
+        httpsAgent: agent,
+        auth: {
+          username: process.env.EFI_CLIENT_ID,
+          password: process.env.EFI_CLIENT_SECRET,
+        },
+      }
+    );
+
+    const token = tokenResponse.data.access_token;
 
     const response = await axios.get(
       `https://pix.api.efipay.com.br/v2/cob/${txid}`,
@@ -490,8 +494,6 @@ app.get("/verificar-pagamento/:txid", async (req, res) => {
       ok: false,
       erro: "Erro ao verificar pagamento",
       detalhe: error.response?.data || error.message,
-      code: error.code || null,
-      details: error.details || null,
     });
   }
 });
@@ -523,7 +525,6 @@ app.post("/webhook/efi/pix", async (req, res) => {
           pagoEm: FieldValue.serverTimestamp(),
           atualizadoEm: FieldValue.serverTimestamp(),
           webhookBruto: pagamento,
-          efiStatus: "CONCLUIDA",
         },
         { merge: true }
       );
@@ -549,7 +550,7 @@ app.post("/webhook/efi/pix", async (req, res) => {
 });
 
 /* =========================
-   CRIAR LINK DE PAGAMENTO CARTÃO
+   CRIAR LINK DE PAGAMENTO CARTÃO - SDK
 ========================= */
 app.post("/criar-link-cartao", async (req, res) => {
   try {
@@ -571,113 +572,72 @@ app.post("/criar-link-cartao", async (req, res) => {
       });
     }
 
-    const token = await obterTokenCobrancas();
-
-    // PASSO 1: cria a transação
-    const payloadCharge = {
+    const body = {
       items: [
         {
-          name: `Mensalidade ${mes || nomeMesAtual()} - ${nome}`,
+          name: `Mensalidade ${mes || "Mensalidade"} - ${nome}`,
           value: Math.round(Number(valor) * 100),
           amount: 1,
         },
       ],
       metadata: {
-        custom_id: JSON.stringify({
-          jogadorId: jogadorId || null,
-          mes: mes || nomeMesAtual(),
-          nome,
-          cpf: somenteNumeros(cpf),
-          email: email || "cliente@gentefera.com",
-        }),
-        notification_url: EFI_NOTIFICATION_URL,
+        notification_url:
+          "https://app-futebol-backend.onrender.com/notificacao-efi",
+        custom_id: `jogador_${jogadorId || "semid"}_mes_${mes || "mensalidade"}`,
+      },
+      customer: {
+        email: email || "juniordutrabkj285@gmail.com",
+      },
+      settings: {
+        payment_method: "credit_card",
+        request_delivery_address: false,
+        expire_at: "2026-04-25",
       },
     };
 
-    const responseCharge = await axios.post(
-      "https://cobrancas.api.efipay.com.br/v1/charge",
-      payloadCharge,
-      {
-        httpsAgent: agent,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+    const response = await efipay.createOneStepLink({}, body);
 
-    const chargeData = responseCharge.data?.data || responseCharge.data || {};
+    const data = response.data || response;
     const chargeId =
-      chargeData.charge_id || chargeData.chargeId || chargeData.id || null;
+      data?.charge_id ||
+      data?.chargeId ||
+      data?.data?.charge_id ||
+      null;
 
-    if (!chargeId) {
-      throw new Error("A Efí não retornou charge_id");
-    }
-
-    // PASSO 2: gera o link para cartão
-    const payloadLink = {
-      payment_method: "all",
-    };
-
-    const responseLink = await axios.post(
-      `https://cobrancas.api.efipay.com.br/v1/charge/${chargeId}/link`,
-      payloadLink,
-      {
-        httpsAgent: agent,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const linkData = responseLink.data?.data || responseLink.data || {};
     const paymentUrl =
-      linkData.payment_url || linkData.paymentUrl || null;
+      data?.payment_url ||
+      data?.paymentUrl ||
+      data?.data?.payment_url ||
+      null;
 
-    if (!paymentUrl) {
-      throw new Error("A Efí não retornou payment_url");
-    }
-
-    const docId = String(chargeId);
-
-    await db.collection("cobrancas").doc(docId).set(
-      {
-        jogadorId: jogadorId || null,
-        nome,
-        cpf: somenteNumeros(cpf),
-        valor: Number(valor),
-        mes: mes || nomeMesAtual(),
-        status: "pendente",
-        efiStatus: "link",
-        formaPagamento: "cartao",
-        tipo: "cartao",
-        chargeId,
-        paymentUrl,
-        email: email || "cliente@gentefera.com",
-        criadoEm: FieldValue.serverTimestamp(),
-        atualizadoEm: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    await db.collection("cobrancas_cartao").add({
+      jogadorId: jogadorId || null,
+      nome,
+      cpf: somenteNumeros(cpf),
+      valor: Number(valor),
+      mes: mes || null,
+      chargeId,
+      paymentUrl,
+      status: "pendente",
+      criadoEm: FieldValue.serverTimestamp(),
+      atualizadoEm: FieldValue.serverTimestamp(),
+      formaPagamento: "cartao",
+      tipo: "cartao",
+    });
 
     return res.status(200).json({
       sucesso: true,
       chargeId,
       paymentUrl,
+      dados: data,
     });
   } catch (error) {
-    console.log("❌ ERRO CARTÃO:", error.message);
-
-    if (error.response) {
-      console.log("❌ STATUS EFI:", error.response.status);
-      console.log("❌ DATA EFI:", JSON.stringify(error.response.data, null, 2));
-    }
+    console.log("❌ ERRO CARTÃO SDK:", error);
 
     return res.status(500).json({
       sucesso: false,
       erro: "Erro ao gerar link de cartão",
-      detalhe: error.response?.data || error.message,
+      detalhe: error?.response?.data || error,
     });
   }
 });
@@ -687,150 +647,16 @@ app.post("/criar-link-cartao", async (req, res) => {
 ========================= */
 app.post("/notificacao-efi", async (req, res) => {
   try {
-    console.log(
-      "📥 Notificação EFI recebida:",
-      JSON.stringify(req.body, null, 2)
-    );
-
-    const tokenNotificacao =
-      req.body?.notification ||
-      req.body?.token ||
-      req.query?.notification ||
-      req.query?.token ||
-      null;
-
-    if (!tokenNotificacao) {
-      return res.status(400).send("Token de notificação não enviado");
-    }
-
-    const token = await obterTokenCobrancas();
-
-    const response = await axios.get(
-      `https://cobrancas.api.efipay.com.br/v1/notification/${tokenNotificacao}`,
-      {
-        httpsAgent: agent,
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-
-    const notificacoes = response.data?.data || [];
-
-    for (const item of notificacoes) {
-      const customIdBruto = item.custom_id || "{}";
-      let customId = {};
-
-      try {
-        customId = JSON.parse(customIdBruto);
-      } catch (_) {
-        customId = {};
-      }
-
-      const chargeId =
-        item.identifiers?.charge_id ||
-        item.charge_id ||
-        item.chargeId ||
-        null;
-
-      const statusEfi = item.status?.current || item.status || "new";
-      const statusInterno = statusInternoPorStatusEfi(statusEfi);
-      const pago = String(statusEfi).toLowerCase() === "paid";
-
-      let cobrancaRef = null;
-      let cobrancaSnap = null;
-      let cobrancaSalva = null;
-
-      if (chargeId) {
-        cobrancaRef = db.collection("cobrancas").doc(String(chargeId));
-        cobrancaSnap = await cobrancaRef.get();
-
-        if (cobrancaSnap.exists) {
-          cobrancaSalva = cobrancaSnap.data();
-
-          await cobrancaRef.set(
-            {
-              status: pago ? "pago" : statusInterno.toLowerCase(),
-              efiStatus: statusEfi,
-              atualizadoEm: FieldValue.serverTimestamp(),
-              pagoEm: pago ? FieldValue.serverTimestamp() : null,
-              retornoConsulta: item,
-            },
-            { merge: true }
-          );
-        } else {
-          const querySnap = await db
-            .collection("cobrancas")
-            .where("chargeId", "==", chargeId)
-            .limit(1)
-            .get();
-
-          if (!querySnap.empty) {
-            cobrancaRef = querySnap.docs[0].ref;
-            cobrancaSalva = querySnap.docs[0].data();
-
-            await cobrancaRef.set(
-              {
-                status: pago ? "pago" : statusInterno.toLowerCase(),
-                efiStatus: statusEfi,
-                atualizadoEm: FieldValue.serverTimestamp(),
-                pagoEm: pago ? FieldValue.serverTimestamp() : null,
-                retornoConsulta: item,
-              },
-              { merge: true }
-            );
-          }
-        }
-      }
-
-      const cobrancaFinal = cobrancaSalva || {
-        jogadorId: customId.jogadorId || null,
-        mes: customId.mes || null,
-        nome: customId.nome || null,
-        chargeId,
-        formaPagamento: "cartao",
-        tipo: "cartao",
-      };
-
-      if (pago && cobrancaFinal?.jogadorId && cobrancaFinal?.mes) {
-        await atualizarJogadorComoPago(cobrancaFinal);
-
-        await salvarHistoricoPagamento({
-          txid: String(chargeId || gerarTxid()),
-          cobrancaSalva: {
-            ...cobrancaFinal,
-            formaPagamento: "cartao",
-            tipo: "cartao",
-            chargeId,
-          },
-          statusEfi,
-          cobrancaEfi: item,
-        });
-      }
-
-      console.log("✅ Notificação processada:", {
-        chargeId,
-        statusEfi,
-        statusInterno,
-        pago,
-      });
-    }
-
+    console.log("📥 Notificação EFI cartão:", JSON.stringify(req.body, null, 2));
     return res.status(200).send("OK");
   } catch (error) {
     console.log("❌ ERRO NOTIFICAÇÃO EFI:", error.message);
-
-    if (error.response) {
-      console.log("❌ STATUS EFI:", error.response.status);
-      console.log("❌ DATA EFI:", JSON.stringify(error.response.data, null, 2));
-    }
-
-    return res.status(500).send("Erro ao processar notificação");
+    return res.status(500).send("Erro");
   }
 });
 
 /* =========================
-   HISTÓRICO POR JOGADOR
+   LISTAR HISTÓRICO POR JOGADOR
 ========================= */
 app.get("/historico-pagamentos/:jogadorId", async (req, res) => {
   try {
@@ -877,7 +703,7 @@ app.get("/historico-pagamentos/:jogadorId", async (req, res) => {
 });
 
 /* =========================
-   LISTAR PENDENTES
+   LISTAR PENDENTES DE UM MÊS
 ========================= */
 app.get("/pendentes/:mes", async (req, res) => {
   try {
