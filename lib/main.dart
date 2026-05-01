@@ -62,9 +62,9 @@ class AppConfig {
   static const double valorMensalidade = 50.0;
   static const String usuarioAdmin = 'admin';
   static const String senhaAdmin = '1234';
-
   static const String backendBaseUrl =
       'https://app-futebol-backend.onrender.com';
+  static const String emailPagamento = 'juniordutrabkj285@gmail.com';
 }
 
 class Jogador {
@@ -182,6 +182,8 @@ class AppTexts {
     'Novembro',
     'Dezembro',
   ];
+
+  static String get mesAtual => meses[DateTime.now().month - 1];
 }
 
 class FirebaseJogadoresService {
@@ -231,7 +233,9 @@ class FirebaseJogadoresService {
     required Jogador jogador,
     required String mes,
   }) async {
-    final pagoAtual = (jogador.pagamentos[mes] ?? false) == true;
+    final valorAtual = jogador.pagamentos[mes];
+    final pagoAtual = valorAtual == true ||
+        (valorAtual is Map<String, dynamic> && valorAtual['pago'] == true);
 
     await jogadoresRef.doc(jogador.id).update({
       'pagamentos.$mes': !pagoAtual,
@@ -434,7 +438,10 @@ class TelaInicial extends StatelessWidget {
                             Navigator.push(
                               context,
                               MaterialPageRoute(
-                                builder: (_) => const TelaPagamento(),
+                                builder: (_) => TelaPagamento(
+                                  jogadorId: 'publico',
+                                  mes: AppTexts.mesAtual,
+                                ),
                               ),
                             );
                           },
@@ -504,7 +511,6 @@ class TelaInicial extends StatelessWidget {
     );
   }
 }
-
 class TelaPagamento extends StatefulWidget {
   final String? jogadorId;
   final String? mes;
@@ -527,7 +533,8 @@ class _TelaPagamentoState extends State<TelaPagamento> {
   late final TextEditingController nomeController;
   late final TextEditingController cpfController;
 
-  bool carregando = false;
+  bool carregandoPix = false;
+  bool carregandoCartao = false;
   bool verificandoPagamento = false;
   bool pagamentoConfirmado = false;
 
@@ -562,7 +569,7 @@ class _TelaPagamentoState extends State<TelaPagamento> {
     _timer?.cancel();
 
     setState(() {
-      carregando = true;
+      carregandoPix = true;
       erro = null;
       txid = null;
       copiaecola = null;
@@ -577,8 +584,8 @@ class _TelaPagamentoState extends State<TelaPagamento> {
         'nome': nome,
         'valor': AppConfig.valorMensalidade,
         'cpf': cpf,
-        'jogadorId': widget.jogadorId,
-        'mes': widget.mes,
+        'jogadorId': widget.jogadorId ?? 'publico',
+        'mes': widget.mes ?? AppTexts.mesAtual,
       };
 
       final response = await http.post(
@@ -624,11 +631,10 @@ class _TelaPagamentoState extends State<TelaPagamento> {
         statusTexto = null;
       });
     } finally {
-      if (mounted) {
-        setState(() {
-          carregando = false;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        carregandoPix = false;
+      });
     }
   }
 
@@ -646,25 +652,31 @@ class _TelaPagamentoState extends State<TelaPagamento> {
     }
 
     setState(() {
-      carregando = true;
+      carregandoCartao = true;
       erro = null;
       statusTexto = 'Gerando link de pagamento com cartão...';
     });
 
     try {
       final body = {
-        'jogadorId': widget.jogadorId,
+        'jogadorId': widget.jogadorId ?? 'publico',
         'nome': nome,
         'valor': AppConfig.valorMensalidade,
         'cpf': cpf,
-        'mes': widget.mes,
+        'mes': widget.mes ?? AppTexts.mesAtual,
+        'email': AppConfig.emailPagamento,
       };
+
+      debugPrint('BODY CARTAO: ${jsonEncode(body)}');
 
       final response = await http.post(
         Uri.parse('${AppConfig.backendBaseUrl}/criar-link-cartao'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(body),
       );
+
+      debugPrint('STATUS CARTAO: ${response.statusCode}');
+      debugPrint('RESPOSTA CARTAO: ${response.body}');
 
       final data = jsonDecode(response.body);
 
@@ -676,7 +688,10 @@ class _TelaPagamentoState extends State<TelaPagamento> {
         }
 
         final uri = Uri.parse(paymentUrl);
-        final abriu = await launchUrl(uri, mode: LaunchMode.externalApplication);
+        final abriu = await launchUrl(
+          uri,
+          mode: LaunchMode.externalApplication,
+        );
 
         if (!abriu) {
           throw Exception('Não foi possível abrir o link de pagamento.');
@@ -691,10 +706,13 @@ class _TelaPagamentoState extends State<TelaPagamento> {
         throw Exception(
           data['mensagem']?.toString() ??
               data['erro']?.toString() ??
+              data['detalhe']?.toString() ??
               'Erro ao gerar link de cartão.',
         );
       }
     } catch (e) {
+      debugPrint('ERRO CARTAO FLUTTER: $e');
+
       if (!mounted) return;
 
       setState(() {
@@ -703,15 +721,13 @@ class _TelaPagamentoState extends State<TelaPagamento> {
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Erro no cartão: $e'),
-        ),
+        SnackBar(content: Text('Erro no cartão: $e')),
       );
     } finally {
       if (!mounted) return;
 
       setState(() {
-        carregando = false;
+        carregandoCartao = false;
       });
     }
   }
@@ -902,8 +918,10 @@ class _TelaPagamentoState extends State<TelaPagamento> {
                       width: double.infinity,
                       height: 55,
                       child: ElevatedButton.icon(
-                        onPressed: carregando ? null : gerarPix,
-                        icon: carregando
+                        onPressed: carregandoPix || carregandoCartao
+                            ? null
+                            : gerarPix,
+                        icon: carregandoPix
                             ? const SizedBox(
                                 height: 20,
                                 width: 20,
@@ -914,7 +932,7 @@ class _TelaPagamentoState extends State<TelaPagamento> {
                               )
                             : const Icon(Icons.qr_code),
                         label: Text(
-                          carregando ? 'Gerando PIX...' : 'Gerar PIX',
+                          carregandoPix ? 'Gerando PIX...' : 'Gerar PIX',
                         ),
                         style: botaoVermelho(),
                       ),
@@ -1086,9 +1104,24 @@ class _TelaPagamentoState extends State<TelaPagamento> {
                       width: double.infinity,
                       height: 55,
                       child: ElevatedButton.icon(
-                        onPressed: carregando ? null : pagarComCartao,
-                        icon: const Icon(Icons.credit_card),
-                        label: const Text('Pagar com Cartão'),
+                        onPressed: carregandoPix || carregandoCartao
+                            ? null
+                            : pagarComCartao,
+                        icon: carregandoCartao
+                            ? const SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.credit_card),
+                        label: Text(
+                          carregandoCartao
+                              ? 'Gerando link...'
+                              : 'Pagar com Cartão',
+                        ),
                         style: botaoEscuro(),
                       ),
                     ),
@@ -1111,7 +1144,6 @@ class _TelaPagamentoState extends State<TelaPagamento> {
     );
   }
 }
-
 class LoginAdminPage extends StatefulWidget {
   const LoginAdminPage({super.key});
 
@@ -1475,14 +1507,18 @@ class _PainelAdminPageState extends State<PainelAdminPage> {
     }
   }
 
+  bool jogadorPagoNoMes(Jogador jogador) {
+    final valor = jogador.pagamentos[mesSelecionado];
+    return valor == true ||
+        (valor is Map<String, dynamic> && valor['pago'] == true);
+  }
+
   String statusJogadorNoMes(Jogador jogador) {
-    final pago = (jogador.pagamentos[mesSelecionado] ?? false) == true;
-    return pago ? 'Pago' : 'Pendente';
+    return jogadorPagoNoMes(jogador) ? 'Pago' : 'Pendente';
   }
 
   Color corStatusJogador(Jogador jogador) {
-    final pago = (jogador.pagamentos[mesSelecionado] ?? false) == true;
-    return pago ? Colors.green : Colors.red;
+    return jogadorPagoNoMes(jogador) ? Colors.green : Colors.red;
   }
 
   String _formatarData(DateTime? data) {
@@ -1545,9 +1581,7 @@ class _PainelAdminPageState extends State<PainelAdminPage> {
   }
 
   Future<void> cobrarPendentesNoWhatsApp(List<Jogador> jogadores) async {
-    final pendentes = jogadores
-        .where((j) => (j.pagamentos[mesSelecionado] ?? false) != true)
-        .toList();
+    final pendentes = jogadores.where((j) => !jogadorPagoNoMes(j)).toList();
 
     if (pendentes.isEmpty) {
       if (!mounted) return;
@@ -1883,13 +1917,11 @@ class _PainelAdminPageState extends State<PainelAdminPage> {
 
           final jogadores = snapshot.data ?? [];
 
-          final pagantesDoMes = jogadores
-              .where((j) => (j.pagamentos[mesSelecionado] ?? false) == true)
-              .length;
+          final pagantesDoMes =
+              jogadores.where((j) => jogadorPagoNoMes(j)).length;
 
-          final pendentesDoMes = jogadores
-              .where((j) => (j.pagamentos[mesSelecionado] ?? false) != true)
-              .length;
+          final pendentesDoMes =
+              jogadores.where((j) => !jogadorPagoNoMes(j)).length;
 
           final totalJogadores = jogadores.length;
           final valorPrevistoDoMes = totalJogadores * AppConfig.valorMensalidade;
@@ -2134,8 +2166,7 @@ class _PainelAdminPageState extends State<PainelAdminPage> {
                         )
                       else
                         ...jogadores.map((jogador) {
-                          final pago =
-                              (jogador.pagamentos[mesSelecionado] ?? false) == true;
+                          final pago = jogadorPagoNoMes(jogador);
 
                           return Container(
                             margin: const EdgeInsets.only(bottom: 12),
