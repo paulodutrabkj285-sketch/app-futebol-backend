@@ -705,14 +705,14 @@ app.get("/historico-pagamentos/:jogadorId", async (req, res) => {
 /* =========================
    LISTAR PENDENTES DE UM MÊS
 ========================= */
-app.get("/pendentes/:mes", async (req, res) => {
+app.get("/historico-pagamentos/:jogadorId", async (req, res) => {
   try {
-    const { mes } = req.params;
+    const { jogadorId } = req.params;
 
-    if (!mes) {
+    if (!jogadorId) {
       return res.status(400).json({
         ok: false,
-        erro: "Mês não informado",
+        erro: "jogadorId não informado",
       });
     }
 
@@ -723,26 +723,56 @@ app.get("/pendentes/:mes", async (req, res) => {
       });
     }
 
-    const snapshot = await db.collection("jogadores").get();
+    // Busca no historico_pagamentos
+    const historicoSnapshot = await db
+      .collection("historico_pagamentos")
+      .where("jogadorid", "==", jogadorId)
+      .get();
 
-    const pendentes = snapshot.docs
-      .map((doc) => ({
+    // Busca também em cobrancas
+    const cobrancasSnapshot = await db
+      .collection("cobrancas")
+      .where("jogadorId", "==", jogadorId)
+      .where("status", "==", "pago")
+      .get();
+
+    const historico = [];
+
+    historicoSnapshot.docs.forEach((doc) => {
+      historico.push({
         id: doc.id,
         ...doc.data(),
-      }))
-      .filter((jogador) => jogador?.pagamentos?.[mes] !== true);
+      });
+    });
+
+    cobrancasSnapshot.docs.forEach((doc) => {
+      historico.push({
+        id: doc.id,
+        ...doc.data(),
+      });
+    });
+
+    historico.sort((a, b) => {
+      const dataA =
+        a.criadoEm?._seconds || a.pagoEm?._seconds || 0;
+
+      const dataB =
+        b.criadoEm?._seconds || b.pagoEm?._seconds || 0;
+
+      return dataB - dataA;
+    });
 
     return res.json({
       ok: true,
-      mes,
-      total: pendentes.length,
-      pendentes,
+      total: historico.length,
+      historico,
     });
   } catch (error) {
-    console.log("❌ Erro ao listar pendentes:", error.message);
+    console.log("❌ Erro ao listar histórico:", error.message);
+
     return res.status(500).json({
       ok: false,
-      erro: "Erro ao listar pendentes",
+      erro: "Erro ao listar histórico",
       detalhe: error.message,
     });
   }
