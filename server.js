@@ -150,19 +150,37 @@ async function atualizarJogadorComoPago(cobrancaSalva) {
     return;
   }
 
+  const meses = String(cobrancaSalva.mes)
+    .split(",")
+    .map((m) => m.trim())
+    .filter((m) => m.length > 0);
+
+  if (meses.length === 0) {
+    return;
+  }
+
+  const updates = {
+    atualizadoEm: FieldValue.serverTimestamp(),
+  };
+
+  meses.forEach((mes) => {
+    updates[`pagamentos.${mes}`] = true;
+    updates[`pagamentos_detalhes.${mes}`] = {
+      pago: true,
+      forma: "pix",
+      txid: cobrancaSalva.txid || null,
+      valor: Number(cobrancaSalva.valor || 0) / meses.length,
+      atualizado_em: FieldValue.serverTimestamp(),
+    };
+  });
+
   await db
     .collection("jogadores")
     .doc(cobrancaSalva.jogadorId)
-    .set(
-      {
-        [`pagamentos.${cobrancaSalva.mes}`]: true,
-        atualizadoEm: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    .set(updates, { merge: true });
 
   console.log(
-    `✅ Jogador ${cobrancaSalva.jogadorId} marcado como pago em ${cobrancaSalva.mes}`
+    `✅ Jogador ${cobrancaSalva.jogadorId} marcado como pago em: ${meses.join(", ")}`
   );
 }
 
